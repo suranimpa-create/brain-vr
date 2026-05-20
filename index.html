@@ -26,6 +26,14 @@ AFRAME.registerComponent('brain', {
     let intensity = 0, prevRot = null, rotHist = [];
     let burstLocked = false;
 
+    // Continuously updated hand positions — written every tick
+    const handPos = {
+      lh: new THREE.Vector3(0, 0, 0),
+      rh: new THREE.Vector3(0, 0, 0),
+      lhValid: false,
+      rhValid: false
+    };
+
     const glitterColors = [
       {r:255,g:220,b:50},{r:255,g:100,b:220},{r:80,g:220,b:255},
       {r:255,g:255,b:255},{r:180,g:120,b:255},{r:255,g:160,b:60},{r:120,g:255,b:180}
@@ -35,7 +43,54 @@ AFRAME.registerComponent('brain', {
     function lerp(a,b,t){return a+(b-a)*t;}
     function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
     function dist(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
+    function dist3v(a,v){return Math.sqrt((a.x-v.x)**2+(a.y-v.y)**2+(a.z-v.z)**2);}
     function fmt(v){return parseFloat(v.toFixed(3));}
+
+    // ── Update hand positions every tick ─────────────────────────────────
+    // This runs constantly so by the time a pinch fires the position is fresh
+    function updateHandPositions(){
+      const lh=document.getElementById('lh');
+      const rh=document.getElementById('rh');
+      const rootObj=root.object3D;
+
+      ['lh','rh'].forEach(id=>{
+        const handEl=document.getElementById(id);
+        const comp=handEl.components&&handEl.components['hand-tracking-controls'];
+        let found=false;
+
+        if(comp&&comp.joints){
+          // Try joints from most to least reliable
+          const names=['wrist','index-finger-metacarpal','middle-finger-metacarpal','thumb-metacarpal','index-finger-tip'];
+          for(const name of names){
+            const j=comp.joints[name];
+            if(!j) continue;
+            const wp=new THREE.Vector3();
+            j.getWorldPosition(wp);
+            // Skip if zero — means untracked
+            if(Math.abs(wp.x)<0.001&&Math.abs(wp.y)<0.001&&Math.abs(wp.z)<0.001) continue;
+            // Convert to root local space
+            const local=wp.clone();
+            rootObj.worldToLocal(local);
+            handPos[id].copy(local);
+            handPos[id+'Valid']=true;
+            found=true;
+            break;
+          }
+        }
+
+        if(!found){
+          // Fall back to the hand entity's object3D position
+          const wp=new THREE.Vector3();
+          handEl.object3D.getWorldPosition(wp);
+          if(Math.abs(wp.x)>0.001||Math.abs(wp.y)>0.001||Math.abs(wp.z)>0.001){
+            const local=wp.clone();
+            rootObj.worldToLocal(local);
+            handPos[id].copy(local);
+            handPos[id+'Valid']=true;
+          }
+        }
+      });
+    }
 
     // ── Dust pool ─────────────────────────────────────────────────────────
     for(let i=0;i<300;i++){
@@ -129,7 +184,7 @@ AFRAME.registerComponent('brain', {
       n.fire=1.0;
       n.timer=isBurst?rnd(20,40):rnd(60,Math.max(70,220-intensity*160));
       spawnDust(n.pos,isBurst?35:3,isBurst);
-      if(isBurst) spawnRing(n.pos);
+      if(isBurst)spawnRing(n.pos);
       let activated=0;
       conns.filter(c=>c.a===n||c.b===n).sort(()=>Math.random()-0.5).forEach(c=>{
         if(activated>=(isBurst?4:2))return;
@@ -141,77 +196,41 @@ AFRAME.registerComponent('brain', {
       });
     }
 
-    // ── Get live hand position fresh every call ───────────────────────────
-    // Reads directly from the THREE.js object3D every time — no caching
-    function getLiveHandPos(handEl){
-      const comp=handEl.components&&handEl.components['hand-tracking-controls'];
-      // Try each joint in order until one works
-      const jointNames=['wrist','index-finger-tip','thumb-tip','index-finger-metacarpal'];
-      if(comp&&comp.joints){
-        for(const name of jointNames){
-          const j=comp.joints[name];
-          if(j){
-            const wp=new THREE.Vector3();
-            j.getWorldPosition(wp);
-            // Sanity check — if position is exactly 0,0,0 the joint isn't tracked yet
-            if(wp.x===0&&wp.y===0&&wp.z===0) continue;
-            const local=wp.clone();
-            root.object3D.worldToLocal(local);
-            return {pos:local, valid:true};
-          }
-        }
-      }
-      // Last resort: hand entity itself
-      const wp=new THREE.Vector3();
-      handEl.object3D.getWorldPosition(wp);
-      const local=wp.clone();
-      root.object3D.worldToLocal(local);
-      return {pos:local, valid:wp.x!==0||wp.y!==0||wp.z!==0};
-    }
-
-    // ── Find closest neuron to a position ────────────────────────────────
-    function closestNeuron(localPos){
-      let best=null, bestD=Infinity;
-      neurons.forEach(n=>{
-        const d=dist(n.pos,localPos);
-        if(d<bestD){bestD=d;best=n;}
-      });
-      return best;
-    }
-
-    // ── Single burst — ONE neuron only ───────────────────────────────────
-    function triggerBurst(handEl){
+    // ── Burst using the continuously tracked position ─────────────────────
+    function triggerBurst(handId){
       if(burstLocked)return;
+      if(!handPos[handId+'Valid'])return; // no valid position yet
       burstLocked=true;
       setTimeout(()=>{burstLocked=false;},1000);
 
-      const {pos,valid}=getLiveHandPos(handEl);
-      if(!valid)return;
+      // Use the position that was tracked THIS frame — not read at pinch time
+      const pos=handPos[handId];
 
-      // Find the single closest neuron to where hand actually is RIGHT NOW
-      const target=closestNeuron(pos);
-      if(target) fireNeuron(target,true);
+      // Find single closest neuron to where hand actually is
+      let best=null,bestD=Infinity;
+      neurons.forEach(n=>{
+        const d=dist3v(n.pos,pos);
+        if(d<bestD){bestD=d;best=n;}
+      });
+      if(best)fireNeuron(best,true);
     }
 
     // ── Pinch listeners ───────────────────────────────────────────────────
     const lh=document.getElementById('lh');
     const rh=document.getElementById('rh');
+    lh.addEventListener('pinchstarted',()=>triggerBurst('lh'));
+    rh.addEventListener('pinchstarted',()=>triggerBurst('rh'));
 
-    // A-Frame events
-    lh.addEventListener('pinchstarted',()=>triggerBurst(lh));
-    rh.addEventListener('pinchstarted',()=>triggerBurst(rh));
-
-    // WebXR session selectstart — fires on Quest pinch
     document.getElementById('scene').addEventListener('enter-vr',()=>{
       const sess=document.getElementById('scene').xrSession;
       if(!sess)return;
       sess.addEventListener('selectstart',(e)=>{
-        const h=e.inputSource&&e.inputSource.handedness==='right'?rh:lh;
-        triggerBurst(h);
+        const id=e.inputSource&&e.inputSource.handedness==='right'?'rh':'lh';
+        triggerBurst(id);
       });
     });
 
-    // Joint distance fallback
+    // Joint distance pinch fallback
     let lWas=false,rWas=false;
     function isPinching(handEl){
       const c=handEl.components&&handEl.components['hand-tracking-controls'];
@@ -220,7 +239,7 @@ AFRAME.registerComponent('brain', {
       if(!T||!I)return false;
       const tp=new THREE.Vector3(),ip=new THREE.Vector3();
       T.getWorldPosition(tp);I.getWorldPosition(ip);
-      if(tp.x===0&&tp.y===0) return false; // not tracked
+      if(Math.abs(tp.x)<0.001&&Math.abs(tp.y)<0.001)return false;
       return tp.distanceTo(ip)<0.032;
     }
 
@@ -232,6 +251,9 @@ AFRAME.registerComponent('brain', {
     const cam=document.getElementById('cam');
 
     this.tick=function(){
+      // Always update hand positions first thing every frame
+      updateHandPositions();
+
       const rot=cam.object3D.rotation;
       let rv=0;
       if(prevRot){const dx=rot.x-prevRot.x,dy=rot.y-prevRot.y,dz=rot.z-prevRot.z;rv=Math.sqrt(dx*dx+dy*dy+dz*dz)*60;}
@@ -242,8 +264,8 @@ AFRAME.registerComponent('brain', {
       intensity=Math.max(0,intensity-0.0015);
 
       const lP=isPinching(lh),rP=isPinching(rh);
-      if(lP&&!lWas)triggerBurst(lh);
-      if(rP&&!rWas)triggerBurst(rh);
+      if(lP&&!lWas)triggerBurst('lh');
+      if(rP&&!rWas)triggerBurst('rh');
       lWas=lP;rWas=rP;
 
       neurons.forEach(n=>{
