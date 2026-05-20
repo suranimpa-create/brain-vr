@@ -8,15 +8,11 @@
 <body>
 <a-scene background="color: #010100" vr-mode-ui="enabled:true" id="scene">
   <a-light type="ambient" color="#1a0e00" intensity="1.5"></a-light>
-
-  <!-- Everything in world space — no offsets anywhere -->
   <a-entity id="rig" position="0 0 0">
     <a-camera id="cam" look-controls wasd-controls="enabled:false" position="0 1.6 0"></a-camera>
     <a-entity id="lh" hand-tracking-controls="hand:left;modelStyle:dots"></a-entity>
     <a-entity id="rh" hand-tracking-controls="hand:right;modelStyle:dots"></a-entity>
   </a-entity>
-
-  <!-- Neurons centered at eye height, no parent offset -->
   <a-entity id="root" position="0 1.6 0"></a-entity>
   <a-sphere radius="16" position="0 1.6 0" material="color:#050300;side:back;transparent:false"></a-sphere>
 </a-scene>
@@ -29,11 +25,7 @@ AFRAME.registerComponent('brain', {
     const neurons = [], conns = [], dust = [], ring = [];
     let intensity = 0, prevRot = null, rotHist = [];
     let burstLocked = false;
-
-    // Store hand world positions — NO coordinate conversion, raw world space
-    const lhWorldPos = new THREE.Vector3();
-    const rhWorldPos = new THREE.Vector3();
-    let lhValid = false, rhValid = false;
+    let lastPinchHandId = 'lh'; // track which hand pinched last
 
     const glitterColors = [
       {r:255,g:220,b:50},{r:255,g:100,b:220},{r:80,g:220,b:255},
@@ -43,54 +35,10 @@ AFRAME.registerComponent('brain', {
     function rnd(a,b){return a+Math.random()*(b-a);}
     function lerp(a,b,t){return a+(b-a)*t;}
     function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+    function distL(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
     function fmt(v){return parseFloat(v.toFixed(3));}
 
-    // Distance between neuron pos (local to root) and world pos
-    // Neuron positions are stored relative to root which is at 0,1.6,0
-    // So neuron world pos = neuron.pos + (0, 1.6, 0)
-    const ROOT_OFFSET = new THREE.Vector3(0, 1.6, 0);
-    function distNeuronToWorld(neuronPos, worldPos){
-      const wx = neuronPos.x + ROOT_OFFSET.x;
-      const wy = neuronPos.y + ROOT_OFFSET.y;
-      const wz = neuronPos.z + ROOT_OFFSET.z;
-      return Math.sqrt((wx-worldPos.x)**2+(wy-worldPos.y)**2+(wz-worldPos.z)**2);
-    }
-
-    function distLocal(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
-    function fmt3(p){return `${fmt(p.x)} ${fmt(p.y)} ${fmt(p.z)}`;}
-
-    // ── Track hand world positions every tick ─────────────────────────────
-    function trackHands(){
-      const lh=document.getElementById('lh');
-      const rh=document.getElementById('rh');
-
-      function readHand(handEl, outVec){
-        const comp=handEl.components&&handEl.components['hand-tracking-controls'];
-        if(comp&&comp.joints){
-          const names=['wrist','index-finger-metacarpal','index-finger-tip','thumb-tip'];
-          for(const name of names){
-            const j=comp.joints[name];
-            if(!j)continue;
-            const wp=new THREE.Vector3();
-            j.getWorldPosition(wp);
-            if(Math.abs(wp.x)<0.0001&&Math.abs(wp.y)<0.0001&&Math.abs(wp.z)<0.0001)continue;
-            outVec.copy(wp);
-            return true;
-          }
-        }
-        // Fallback: hand entity world pos
-        const wp=new THREE.Vector3();
-        handEl.object3D.getWorldPosition(wp);
-        if(Math.abs(wp.x)<0.0001&&Math.abs(wp.y)<0.0001&&Math.abs(wp.z)<0.0001)return false;
-        outVec.copy(wp);
-        return true;
-      }
-
-      lhValid = readHand(lh, lhWorldPos);
-      rhValid = readHand(rh, rhWorldPos);
-    }
-
-    // ── Dust pool ─────────────────────────────────────────────────────────
+    // ── Dust ─────────────────────────────────────────────────────────────
     for(let i=0;i<300;i++){
       const el=document.createElement('a-sphere');
       el.setAttribute('radius',0.008);
@@ -100,7 +48,6 @@ AFRAME.registerComponent('brain', {
       root.appendChild(el);
       dust.push({el,active:false,x:0,y:0,z:0,vx:0,vy:0,vz:0,life:0,col:null});
     }
-
     function spawnDust(pos,count,isBurst){
       let n=0;
       for(let i=0;i<dust.length&&n<count;i++){
@@ -119,7 +66,7 @@ AFRAME.registerComponent('brain', {
       }
     }
 
-    // ── Ring ──────────────────────────────────────────────────────────────
+    // ── Ring ─────────────────────────────────────────────────────────────
     for(let i=0;i<32;i++){
       const el=document.createElement('a-sphere');
       el.setAttribute('radius',0.025);
@@ -129,12 +76,8 @@ AFRAME.registerComponent('brain', {
       root.appendChild(el);
       ring.push({el,active:false,angle:(i/32)*Math.PI*2,cx:0,cy:0,cz:0,r:0,life:0});
     }
-
     function spawnRing(pos){
-      ring.forEach(d=>{
-        d.active=true;d.cx=pos.x;d.cy=pos.y;d.cz=pos.z;d.r=0.05;d.life=1.0;
-        d.el.setAttribute('visible','true');
-      });
+      ring.forEach(d=>{d.active=true;d.cx=pos.x;d.cy=pos.y;d.cz=pos.z;d.r=0.05;d.life=1.0;d.el.setAttribute('visible','true');});
     }
 
     // ── Neurons ───────────────────────────────────────────────────────────
@@ -152,7 +95,7 @@ AFRAME.registerComponent('brain', {
 
     // ── Connections ───────────────────────────────────────────────────────
     for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){
-      const d=distLocal(neurons[i].pos,neurons[j].pos);
+      const d=distL(neurons[i].pos,neurons[j].pos);
       if(d<3.2&&Math.random()<0.38){
         const a=neurons[i],b=neurons[j];
         const mx=fmt((a.pos.x+b.pos.x)/2),my=fmt((a.pos.y+b.pos.y)/2),mz=fmt((a.pos.z+b.pos.z)/2);
@@ -176,7 +119,7 @@ AFRAME.registerComponent('brain', {
       }
     }
 
-    // ── Fire one neuron ───────────────────────────────────────────────────
+    // ── Fire neuron ───────────────────────────────────────────────────────
     function fireNeuron(n,isBurst){
       if(!n)return;
       n.fire=1.0;
@@ -188,43 +131,101 @@ AFRAME.registerComponent('brain', {
         if(activated>=(isBurst?4:2))return;
         if(Math.random()<(isBurst?0.85:0.2+intensity*0.35)){
           c.active=true;c.t=0;c.dir=c.a===n?1:-1;
-          c.dot.setAttribute('visible','true');
-          activated++;
+          c.dot.setAttribute('visible','true');activated++;
         }
       });
     }
 
-    // ── Burst — uses raw world positions, compares against neuron world pos ─
-    function triggerBurst(useLeft){
-      if(burstLocked)return;
-      const valid = useLeft ? lhValid : rhValid;
-      if(!valid)return;
-      const wpos = useLeft ? lhWorldPos : rhWorldPos;
+    // ── Find closest neuron to a direction ray from camera ────────────────
+    // This is the guaranteed fallback — always works since camera pose is always valid
+    function closestNeuronToGaze(){
+      const cam=document.getElementById('cam');
+      const camPos=new THREE.Vector3();
+      const camDir=new THREE.Vector3();
+      cam.object3D.getWorldPosition(camPos);
+      cam.object3D.getWorldDirection(camDir);
 
-      burstLocked=true;
-      setTimeout(()=>{burstLocked=false;},1000);
+      // Convert cam pos to root-local space
+      const localCamPos=camPos.clone();
+      root.object3D.worldToLocal(localCamPos);
 
-      // Find closest neuron using world-space comparison
-      let best=null, bestD=Infinity;
+      // Project each neuron onto the gaze ray, pick closest to ray
+      let best=null, bestScore=Infinity;
       neurons.forEach(n=>{
-        const d=distNeuronToWorld(n.pos, wpos);
-        if(d<bestD){bestD=d;best=n;}
+        // Vector from camera to neuron (in local space, cam already converted)
+        const toN=new THREE.Vector3(n.pos.x-localCamPos.x, n.pos.y-localCamPos.y, n.pos.z-localCamPos.z);
+        const dist=toN.length();
+        // Project cam direction into local space too
+        const localDir=camDir.clone();
+        // dot product tells us alignment with gaze
+        toN.normalize();
+        // Convert camDir to local
+        const localDirV=new THREE.Vector3();
+        localDirV.copy(camDir);
+        root.object3D.worldToLocal(localDirV.add(camPos)).sub(localCamPos).normalize();
+        const dot=toN.dot(localDirV);
+        // Score: prefer neurons in front (high dot) and not too far
+        const score = dist*(1-dot*0.8);
+        if(score<bestScore){bestScore=score;best=n;}
       });
-      if(best)fireNeuron(best,true);
+      return best;
     }
 
-    // ── Pinch listeners ───────────────────────────────────────────────────
+    // ── Get hand position — tries joints, falls back to gaze ─────────────
+    function getBestTargetNeuron(handId){
+      const handEl=document.getElementById(handId);
+      const comp=handEl.components&&handEl.components['hand-tracking-controls'];
+
+      if(comp&&comp.joints){
+        const names=['wrist','index-finger-metacarpal','index-finger-tip','thumb-tip'];
+        for(const name of names){
+          const j=comp.joints[name];
+          if(!j)continue;
+          const wp=new THREE.Vector3();
+          j.getWorldPosition(wp);
+          // Valid if not zero
+          if(Math.abs(wp.x)>0.01||Math.abs(wp.y)>0.01||Math.abs(wp.z)>0.01){
+            // Convert to root local
+            const local=wp.clone();
+            root.object3D.worldToLocal(local);
+            // Find closest neuron to this local position
+            let best=null,bestD=Infinity;
+            neurons.forEach(n=>{
+              const d=distL(n.pos,local);
+              if(d<bestD){bestD=d;best=n;}
+            });
+            if(best)return best;
+          }
+        }
+      }
+
+      // Guaranteed fallback: use gaze direction
+      return closestNeuronToGaze();
+    }
+
+    // ── Burst ─────────────────────────────────────────────────────────────
+    function triggerBurst(handId){
+      if(burstLocked)return;
+      burstLocked=true;
+      setTimeout(()=>{burstLocked=false;},1000);
+      const target=getBestTargetNeuron(handId);
+      if(target)fireNeuron(target,true);
+    }
+
+    // ── All three pinch methods ───────────────────────────────────────────
     const lh=document.getElementById('lh');
     const rh=document.getElementById('rh');
-    lh.addEventListener('pinchstarted',()=>triggerBurst(true));
-    rh.addEventListener('pinchstarted',()=>triggerBurst(false));
+
+    lh.addEventListener('pinchstarted',()=>{lastPinchHandId='lh';triggerBurst('lh');});
+    rh.addEventListener('pinchstarted',()=>{lastPinchHandId='rh';triggerBurst('rh');});
 
     document.getElementById('scene').addEventListener('enter-vr',()=>{
       const sess=document.getElementById('scene').xrSession;
       if(!sess)return;
       sess.addEventListener('selectstart',(e)=>{
-        const isRight=e.inputSource&&e.inputSource.handedness==='right';
-        triggerBurst(!isRight);
+        const id=e.inputSource&&e.inputSource.handedness==='right'?'rh':'lh';
+        lastPinchHandId=id;
+        triggerBurst(id);
       });
     });
 
@@ -236,7 +237,7 @@ AFRAME.registerComponent('brain', {
       if(!T||!I)return false;
       const tp=new THREE.Vector3(),ip=new THREE.Vector3();
       T.getWorldPosition(tp);I.getWorldPosition(ip);
-      if(Math.abs(tp.x)<0.0001&&Math.abs(tp.y)<0.0001)return false;
+      if(Math.abs(tp.x)<0.001&&Math.abs(tp.y)<0.001&&Math.abs(tp.z)<0.001)return false;
       return tp.distanceTo(ip)<0.032;
     }
 
@@ -248,9 +249,6 @@ AFRAME.registerComponent('brain', {
     const cam=document.getElementById('cam');
 
     this.tick=function(){
-      // Track hands in world space every frame
-      trackHands();
-
       const rot=cam.object3D.rotation;
       let rv=0;
       if(prevRot){const dx=rot.x-prevRot.x,dy=rot.y-prevRot.y,dz=rot.z-prevRot.z;rv=Math.sqrt(dx*dx+dy*dy+dz*dz)*60;}
@@ -261,8 +259,8 @@ AFRAME.registerComponent('brain', {
       intensity=Math.max(0,intensity-0.0015);
 
       const lP=isPinching(lh),rP=isPinching(rh);
-      if(lP&&!lWas)triggerBurst(true);
-      if(rP&&!rWas)triggerBurst(false);
+      if(lP&&!lWas){lastPinchHandId='lh';triggerBurst('lh');}
+      if(rP&&!rWas){lastPinchHandId='rh';triggerBurst('rh');}
       lWas=lP;rWas=rP;
 
       neurons.forEach(n=>{
