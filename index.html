@@ -7,84 +7,48 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/aframe/1.4.2/aframe.min.js"></script>
   <style>
     body { margin: 0; background: #000; }
-    #loading {
-      position: fixed; inset: 0;
-      background: #000;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      color: #88ccff; font-family: monospace;
-      font-size: 14px; letter-spacing: 0.2em;
-      z-index: 9999;
-      transition: opacity 1s;
-    }
-    #loading-bar { width: 160px; height: 1px; background: #112; margin-top: 20px; }
-    #loading-fill { height: 100%; background: #88ccff; width: 0; transition: width 1.5s; }
   </style>
 </head>
 <body>
 
-<div id="loading">
-  <div>INITIALISING NEURAL NETWORK</div>
-  <div id="loading-bar"><div id="loading-fill"></div></div>
-</div>
-
 <a-scene
-  background="color: #000005"
-  renderer="antialias: true; logarithmicDepthBuffer: true"
+  background="color: #000008"
+  renderer="antialias: true"
   vr-mode-ui="enabled: true"
-  hand-tracking-controls-enabled
   id="scene">
 
-  <a-light type="ambient" color="#0a0a1a" intensity="2"></a-light>
-  <a-light type="point" color="#4488ff" intensity="0.3" position="0 0 0"></a-light>
+  <a-light type="ambient" color="#ffffff" intensity="1"></a-light>
 
   <a-entity id="rig" position="0 1.6 0">
     <a-camera id="cam" look-controls wasd-controls="enabled: false"></a-camera>
-
-    <!-- Hand tracking -->
-    <a-entity id="left-hand"
-      hand-tracking-controls="hand: left; modelStyle: dots"
-      position="0 0 0">
-    </a-entity>
-    <a-entity id="right-hand"
-      hand-tracking-controls="hand: right; modelStyle: dots"
-      position="0 0 0">
-    </a-entity>
-
-    <!-- Controller fallback -->
-    <a-entity id="left-ctrl" oculus-touch-controls="hand: left"></a-entity>
-    <a-entity id="right-ctrl" oculus-touch-controls="hand: right"></a-entity>
+    <a-entity id="left-hand" hand-tracking-controls="hand: left; modelStyle: dots"></a-entity>
+    <a-entity id="right-hand" hand-tracking-controls="hand: right; modelStyle: dots"></a-entity>
   </a-entity>
 
   <a-entity id="brain-root" position="0 1.6 0"></a-entity>
-  <a-sphere radius="18" material="color: #000010; side: back; opacity: 0.6; transparent: true"></a-sphere>
+  <a-sphere radius="18" material="color: #000015; side: back; opacity: 0.8; transparent: true"></a-sphere>
 
 </a-scene>
 
 <script>
-const NUM_NEURONS     = 120;
-const BRAIN_RADIUS    = 6;
-const MAX_CONN_DIST   = 2.8;
-const BASE_FIRE_RATE  = 0.008;
-const MAX_FIRE_RATE   = 0.18;
-const PULSE_SPEED     = 1.8;
+const NUM_NEURONS   = 80;
+const BRAIN_RADIUS  = 5;
+const MAX_CONN_DIST = 3;
+const PULSE_SPEED   = 2.5;
 
-let intensity   = 0;
+let intensity   = 0.1;
 let neurons     = [];
 let connections = [];
-let rotationVelHistory = [];
 let burstCooldown = 0;
+let prevEuler = null;
+let rotHistory = [];
 
-// Pinch tracking
-let leftPinching  = false;
-let rightPinching = false;
-let leftWasPinching  = false;
-let rightWasPinching = false;
+function rnd(min, max) { return min + Math.random() * (max - min); }
+function lerp(a, b, t) { return a + (b - a) * t; }
 
-function randSpherePoint(r) {
-  const u = Math.random(), v = Math.random();
-  const theta = 2 * Math.PI * u;
-  const phi   = Math.acos(2 * v - 1);
+function randSphere(r) {
+  const theta = rnd(0, Math.PI * 2);
+  const phi   = Math.acos(rnd(-1, 1));
   const rr    = r * Math.cbrt(Math.random());
   return {
     x: rr * Math.sin(phi) * Math.cos(theta),
@@ -97,80 +61,75 @@ function dist3(a, b) {
   return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2);
 }
 
-function lerp(a, b, t) { return a + (b - a) * t; }
-
-function hexFromIntensity(fireAmt, baseIntensity) {
-  const r = Math.floor(lerp(20,  255, fireAmt * 0.6 + baseIntensity * 0.1));
-  const g = Math.floor(lerp(40,  240, fireAmt * 0.8 + baseIntensity * 0.15));
-  const b = Math.floor(lerp(120, 255, fireAmt + baseIntensity * 0.2));
-  return `rgb(${r},${g},${b})`;
-}
-
+// ── Neuron ────────────────────────────────────────────────────────────────────
 class Neuron {
-  constructor(scene) {
-    this.pos = randSpherePoint(BRAIN_RADIUS);
-    this.fireAmt   = 0;
-    this.firing    = false;
-    this.timer     = Math.random() * 120;
+  constructor(root) {
+    this.pos      = randSphere(BRAIN_RADIUS);
+    this.fireAmt  = 0;
+    this.timer    = rnd(10, 80); // start firing quickly
+
     this.el = document.createElement('a-sphere');
-    this.el.setAttribute('radius', 0.06 + Math.random() * 0.05);
-    this.el.setAttribute('position', `${this.pos.x} ${this.pos.y} ${this.pos.z}`);
-    this.el.setAttribute('material', 'color: #1428a0; emissive: #0a1060; emissiveIntensity: 0.5; shader: standard');
+    this.el.setAttribute('radius', rnd(0.05, 0.10));
+    this.el.setAttribute('position', `${this.pos.x.toFixed(3)} ${this.pos.y.toFixed(3)} ${this.pos.z.toFixed(3)}`);
+    this.el.setAttribute('material', 'color: #2244cc; emissive: #1133aa; emissiveIntensity: 1; shader: standard');
     this.el.setAttribute('segments-height', 8);
     this.el.setAttribute('segments-width', 8);
-    scene.appendChild(this.el);
+    root.appendChild(this.el);
   }
 
   fire() {
-    this.firing  = true;
     this.fireAmt = 1.0;
-    this.timer = 20 + Math.random() * (180 - intensity * 140);
+    this.timer   = rnd(15, 120 - intensity * 90);
+    // propagate
+    connections
+      .filter(c => c.a === this || c.b === this)
+      .forEach(c => { if (Math.random() < 0.4 + intensity * 0.5) c.addPulse(this); });
   }
 
   update() {
     this.timer -= 1;
-    const fireChance = lerp(BASE_FIRE_RATE, MAX_FIRE_RATE, intensity);
-    if (this.timer <= 0 || Math.random() < fireChance * 0.05) {
-      this.fire();
-      connections
-        .filter(c => c.a === this || c.b === this)
-        .forEach(c => {
-          if (Math.random() < 0.35 + intensity * 0.55) c.addPulse(this);
-        });
-    }
-    if (this.firing) {
-      this.fireAmt *= 0.88;
-      if (this.fireAmt < 0.02) { this.firing = false; this.fireAmt = 0; }
-    }
-    const col = hexFromIntensity(this.fireAmt, intensity);
-    const emissiveInt = 0.3 + this.fireAmt * 2.5 + intensity * 0.4;
-    this.el.setAttribute('material', `color: ${col}; emissive: ${col}; emissiveIntensity: ${emissiveInt.toFixed(2)}; shader: standard`);
+    if (this.timer <= 0) this.fire();
+
+    // random spontaneous firing
+    if (Math.random() < 0.001 + intensity * 0.015) this.fire();
+
+    this.fireAmt = Math.max(0, this.fireAmt - 0.06);
+
+    const g = this.fireAmt;
+    const r = Math.floor(lerp(30,  255, g));
+    const gr= Math.floor(lerp(60,  220, g));
+    const b = Math.floor(lerp(200, 255, g));
+    const ei = (0.8 + g * 3).toFixed(2);
+    const col = `rgb(${r},${gr},${b})`;
+    this.el.setAttribute('material', `color: ${col}; emissive: ${col}; emissiveIntensity: ${ei}; shader: standard`);
   }
 }
 
+// ── Pulse ─────────────────────────────────────────────────────────────────────
 class Pulse {
-  constructor(from, to, scene) {
+  constructor(from, to, root) {
     this.from  = from;
     this.to    = to;
     this.t     = 0;
     const d    = dist3(from.pos, to.pos);
     this.speed = PULSE_SPEED / (d * 60);
+    this.root  = root;
+    this.done  = false;
+
     this.el = document.createElement('a-sphere');
-    this.el.setAttribute('radius', 0.035);
+    this.el.setAttribute('radius', 0.045);
     this.el.setAttribute('segments-height', 6);
     this.el.setAttribute('segments-width', 6);
-    this.el.setAttribute('material', 'color: #aaddff; emissive: #88ccff; emissiveIntensity: 2.5; shader: standard');
-    this.el.setAttribute('position', `${from.pos.x} ${from.pos.y} ${from.pos.z}`);
-    scene.appendChild(this.el);
-    this.scene = scene;
-    this.done  = false;
+    this.el.setAttribute('material', 'color: #ffffff; emissive: #aaeeff; emissiveIntensity: 4; shader: standard');
+    this.el.setAttribute('position', `${from.pos.x.toFixed(3)} ${from.pos.y.toFixed(3)} ${from.pos.z.toFixed(3)}`);
+    root.appendChild(this.el);
   }
 
   update() {
-    this.t += this.speed * (1 + intensity * 1.5);
+    this.t += this.speed * (1 + intensity * 2);
     if (this.t >= 1) {
       this.done = true;
-      this.scene.removeChild(this.el);
+      if (this.el.parentNode) this.el.parentNode.removeChild(this.el);
       this.to.fire();
       return;
     }
@@ -181,140 +140,108 @@ class Pulse {
   }
 }
 
+// ── Connection ────────────────────────────────────────────────────────────────
 class Connection {
-  constructor(a, b, scene) {
-    this.a = a;
-    this.b = b;
+  constructor(a, b, root) {
+    this.a      = a;
+    this.b      = b;
     this.pulses = [];
-    this.scene  = scene;
-    const mid = {
-      x: (a.pos.x + b.pos.x) / 2,
-      y: (a.pos.y + b.pos.y) / 2,
-      z: (a.pos.z + b.pos.z) / 2
-    };
+    this.root   = root;
+
+    const mx = ((a.pos.x + b.pos.x) / 2).toFixed(3);
+    const my = ((a.pos.y + b.pos.y) / 2).toFixed(3);
+    const mz = ((a.pos.z + b.pos.z) / 2).toFixed(3);
     const d  = dist3(a.pos, b.pos);
     const dx = b.pos.x - a.pos.x;
     const dy = b.pos.y - a.pos.y;
     const dz = b.pos.z - a.pos.z;
+    const angle = (Math.atan2(Math.sqrt(dx*dx + dz*dz), dy) * 180 / Math.PI - 90).toFixed(2);
+    const rotY  = (Math.atan2(dx, dz) * 180 / Math.PI).toFixed(2);
+
     this.el = document.createElement('a-cylinder');
-    this.el.setAttribute('position', `${mid.x.toFixed(3)} ${mid.y.toFixed(3)} ${mid.z.toFixed(3)}`);
-    this.el.setAttribute('radius', 0.006);
+    this.el.setAttribute('position', `${mx} ${my} ${mz}`);
+    this.el.setAttribute('radius', 0.007);
     this.el.setAttribute('height', d.toFixed(3));
     this.el.setAttribute('segments-radial', 4);
-    this.el.setAttribute('material', `color: #1a3a6a; opacity: 0.25; transparent: true; shader: standard`);
-    const angle = Math.atan2(Math.sqrt(dx*dx + dz*dz), dy) * 180 / Math.PI;
-    const rotY  = Math.atan2(dx, dz) * 180 / Math.PI;
-    this.el.setAttribute('rotation', `${(angle - 90).toFixed(2)} ${rotY.toFixed(2)} 0`);
-    scene.appendChild(this.el);
+    this.el.setAttribute('rotation', `${angle} ${rotY} 0`);
+    this.el.setAttribute('material', 'color: #224488; opacity: 0.2; transparent: true; shader: standard');
+    root.appendChild(this.el);
   }
 
   addPulse(fromNeuron) {
     const from = fromNeuron === this.a ? this.a : this.b;
     const to   = fromNeuron === this.a ? this.b : this.a;
-    this.pulses.push(new Pulse(from, to, this.scene));
+    this.pulses.push(new Pulse(from, to, this.root));
   }
 
   update() {
     this.pulses = this.pulses.filter(p => { p.update(); return !p.done; });
-    const active = this.pulses.length > 0;
-    const op = active ? (0.4 + intensity * 0.3).toFixed(2) : (0.12 + intensity * 0.08).toFixed(2);
-    const col = active ? '#3a7aee' : '#1a3a6a';
+    const op  = (this.pulses.length > 0 ? 0.5 : 0.15).toFixed(2);
+    const col = this.pulses.length > 0 ? '#4488ff' : '#224488';
     this.el.setAttribute('material', `color: ${col}; opacity: ${op}; transparent: true; shader: standard`);
   }
 }
 
-function triggerBurst(handEl) {
+// ── Burst ─────────────────────────────────────────────────────────────────────
+function triggerBurst() {
   if (burstCooldown > 0) return;
-  burstCooldown = 60;
+  burstCooldown = 50;
+  intensity = Math.min(1, intensity + 0.5);
 
-  const handPos = new THREE.Vector3();
-  handEl.object3D.getWorldPosition(handPos);
-  const brainRoot = document.getElementById('brain-root');
-  const localPos  = new THREE.Vector3();
-  brainRoot.object3D.worldToLocal(handPos.clone(), localPos);
-
-  const sorted = neurons.slice().sort((a, b) => {
-    const da = Math.hypot(a.pos.x - localPos.x, a.pos.y - localPos.y, a.pos.z - localPos.z);
-    const db = Math.hypot(b.pos.x - localPos.x, b.pos.y - localPos.y, b.pos.z - localPos.z);
-    return da - db;
+  const picks = neurons.slice().sort(() => Math.random() - 0.5).slice(0, 15);
+  picks.forEach((n, i) => {
+    setTimeout(() => n.fire(), i * 30 + Math.random() * 20);
   });
-
-  sorted.slice(0, 12).forEach((n, i) => {
-    setTimeout(() => {
-      n.fire();
-      connections
-        .filter(c => c.a === n || c.b === n)
-        .forEach(c => { if (Math.random() < 0.8) c.addPulse(n); });
-    }, i * 40 + Math.random() * 30);
-  });
-
-  intensity = Math.min(1, intensity + 0.4);
 }
 
-// Detect pinch from hand joint positions
-function checkPinch(handEl) {
-  if (!handEl || !handEl.components['hand-tracking-controls']) return false;
-  const comp = handEl.components['hand-tracking-controls'];
-  if (!comp.joints) return false;
-
-  const thumb = comp.joints['thumb-tip'];
-  const index = comp.joints['index-finger-tip'];
-  if (!thumb || !index) return false;
-
-  const tp = new THREE.Vector3();
-  const ip = new THREE.Vector3();
-  thumb.getWorldPosition(tp);
-  index.getWorldPosition(ip);
-
-  const d = tp.distanceTo(ip);
-  return d < 0.03; // 3cm threshold
-}
-
+// ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
-  setTimeout(() => { document.getElementById('loading-fill').style.width = '100%'; }, 100);
-  setTimeout(() => {
-    const l = document.getElementById('loading');
-    l.style.opacity = 0;
-    setTimeout(() => l.remove(), 1000);
-  }, 1800);
-
   const scene     = document.getElementById('scene');
   const brainRoot = document.getElementById('brain-root');
 
   scene.addEventListener('loaded', () => {
+
+    // Build neurons
     for (let i = 0; i < NUM_NEURONS; i++) neurons.push(new Neuron(brainRoot));
 
+    // Build connections
     for (let i = 0; i < neurons.length; i++) {
       for (let j = i + 1; j < neurons.length; j++) {
-        const d = dist3(neurons[i].pos, neurons[j].pos);
-        if (d < MAX_CONN_DIST && Math.random() < 0.45) {
+        if (dist3(neurons[i].pos, neurons[j].pos) < MAX_CONN_DIST && Math.random() < 0.4) {
           connections.push(new Connection(neurons[i], neurons[j], brainRoot));
         }
       }
     }
 
-    for (let k = 0; k < 8; k++) {
-      setTimeout(() => neurons[Math.floor(Math.random() * neurons.length)].fire(), k * 300);
+    // Kick off initial firing so it's immediately alive
+    for (let k = 0; k < 12; k++) {
+      setTimeout(() => neurons[Math.floor(Math.random() * neurons.length)].fire(), k * 150);
     }
 
-    // Controller fallback listeners
-    const leftCtrl  = document.getElementById('left-ctrl');
-    const rightCtrl = document.getElementById('right-ctrl');
-    leftCtrl.addEventListener('triggerdown',  () => triggerBurst(leftCtrl));
-    rightCtrl.addEventListener('triggerdown', () => triggerBurst(rightCtrl));
-    leftCtrl.addEventListener('gripdown',     () => triggerBurst(leftCtrl));
-    rightCtrl.addEventListener('gripdown',    () => triggerBurst(rightCtrl));
-
+    // Hand pinch → burst
     const leftHand  = document.getElementById('left-hand');
     const rightHand = document.getElementById('right-hand');
 
-    let prevEuler = null;
-    const cam = document.getElementById('cam');
+    function checkPinch(handEl) {
+      const comp = handEl && handEl.components && handEl.components['hand-tracking-controls'];
+      if (!comp || !comp.joints) return false;
+      const thumb = comp.joints['thumb-tip'];
+      const index = comp.joints['index-finger-tip'];
+      if (!thumb || !index) return false;
+      const tp = new THREE.Vector3(), ip = new THREE.Vector3();
+      thumb.getWorldPosition(tp);
+      index.getWorldPosition(ip);
+      return tp.distanceTo(ip) < 0.03;
+    }
 
+    let lWas = false, rWas = false;
+
+    // Main tick
     scene.addEventListener('tick', () => {
-      // Head rotation → intensity
+      // Head rotation velocity
+      const cam   = document.getElementById('cam');
       const euler = cam.object3D.rotation;
-      let rotVel = 0;
+      let rotVel  = 0;
       if (prevEuler) {
         const dx = euler.x - prevEuler.x;
         const dy = euler.y - prevEuler.y;
@@ -323,35 +250,33 @@ window.addEventListener('load', () => {
       }
       prevEuler = { x: euler.x, y: euler.y, z: euler.z };
 
-      rotationVelHistory.push(rotVel);
-      if (rotationVelHistory.length > 20) rotationVelHistory.shift();
-      const avgVel = rotationVelHistory.reduce((s, v) => s + v, 0) / rotationVelHistory.length;
+      rotHistory.push(rotVel);
+      if (rotHistory.length > 20) rotHistory.shift();
+      const avgVel = rotHistory.reduce((s, v) => s + v, 0) / rotHistory.length;
 
-      const targetIntensity = Math.min(1, avgVel * 3.5);
-      intensity = lerp(intensity, targetIntensity, 0.05);
-      intensity = Math.max(0, intensity - 0.002);
+      const target = Math.min(1, 0.1 + avgVel * 4);
+      intensity = lerp(intensity, target, 0.06);
+      intensity = Math.max(0.05, intensity - 0.001); // never fully idle
+
       if (burstCooldown > 0) burstCooldown--;
 
-      // Pinch detection → burst
-      const lPinch = checkPinch(leftHand);
-      const rPinch = checkPinch(rightHand);
+      // Pinch
+      const lP = checkPinch(leftHand);
+      const rP = checkPinch(rightHand);
+      if (lP && !lWas) triggerBurst();
+      if (rP && !rWas) triggerBurst();
+      lWas = lP; rWas = rP;
 
-      if (lPinch && !leftWasPinching)  triggerBurst(leftHand);
-      if (rPinch && !rightWasPinching) triggerBurst(rightHand);
-      leftWasPinching  = lPinch;
-      rightWasPinching = rPinch;
-
-      // Two-hand spread → intensity boost
+      // Hand spread
       if (leftHand.object3D && rightHand.object3D) {
-        const lPos = new THREE.Vector3();
-        const rPos = new THREE.Vector3();
+        const lPos = new THREE.Vector3(), rPos = new THREE.Vector3();
         leftHand.object3D.getWorldPosition(lPos);
         rightHand.object3D.getWorldPosition(rPos);
-        const handDist  = lPos.distanceTo(rPos);
-        const handBonus = Math.max(0, Math.min(0.3, (handDist - 0.3) / 4));
-        intensity = Math.min(1, intensity + handBonus * 0.02);
+        const bonus = Math.max(0, (lPos.distanceTo(rPos) - 0.3) / 5);
+        intensity = Math.min(1, intensity + bonus * 0.02);
       }
 
+      // Update everything
       neurons.forEach(n => n.update());
       connections.forEach(c => c.update());
     });
