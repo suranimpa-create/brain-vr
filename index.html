@@ -25,17 +25,22 @@ AFRAME.registerComponent('brain', {
     const N = 55, R = 5;
     const neurons = [], conns = [], dust = [], ring = [];
     let intensity = 0, prevRot = null, rotHist = [], burstCD = 0;
-    let lWas = false, rWas = false;
 
-    // Glitter colors — mix of gold, pink, cyan, white, lavender
+    // Single global burst lock — all three detection methods share this
+    let burstLocked = false;
+    function lockBurst() {
+      burstLocked = true;
+      setTimeout(() => { burstLocked = false; }, 1200); // 1.2s cooldown
+    }
+
     const glitterColors = [
-      {r:255,g:220,b:50},  // gold
-      {r:255,g:100,b:220}, // pink
-      {r:80, g:220,b:255}, // cyan
-      {r:255,g:255,b:255}, // white
-      {r:180,g:120,b:255}, // lavender
-      {r:255,g:160,b:60},  // amber
-      {r:120,g:255,b:180}, // mint
+      {r:255,g:220,b:50},
+      {r:255,g:100,b:220},
+      {r:80, g:220,b:255},
+      {r:255,g:255,b:255},
+      {r:180,g:120,b:255},
+      {r:255,g:160,b:60},
+      {r:120,g:255,b:180},
     ];
 
     function rnd(a,b){return a+Math.random()*(b-a);}
@@ -44,10 +49,10 @@ AFRAME.registerComponent('brain', {
     function dist(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
     function fmt(v){return parseFloat(v.toFixed(3));}
 
-    // ── Glitter dust pool ────────────────────────────────────────────────────
+    // ── Dust pool ────────────────────────────────────────────────────────────
     for(let i=0;i<300;i++){
       const el=document.createElement('a-sphere');
-      el.setAttribute('radius', 0.008); // tiny glitter
+      el.setAttribute('radius',0.008);
       el.setAttribute('segments-height',4);el.setAttribute('segments-width',4);
       el.setAttribute('material','color:#ffee88;emissive:#ffcc00;emissiveIntensity:8;shader:standard');
       el.setAttribute('visible','false');
@@ -55,16 +60,14 @@ AFRAME.registerComponent('brain', {
       dust.push({el,active:false,x:0,y:0,z:0,vx:0,vy:0,vz:0,life:0,isBurst:false,col:null});
     }
 
-    function spawnDust(pos, count, isBurst){
+    function spawnDust(pos,count,isBurst){
       let n=0;
       for(let i=0;i<dust.length&&n<count;i++){
-        const d=dust[i]; if(d.active) continue;
+        const d=dust[i]; if(d.active)continue;
         d.active=true; n++;
-        d.x=pos.x; d.y=pos.y; d.z=pos.z;
+        d.x=pos.x;d.y=pos.y;d.z=pos.z;
         d.isBurst=isBurst;
-        d.col=isBurst
-          ? glitterColors[Math.floor(Math.random()*glitterColors.length)]
-          : {r:255,g:180,b:40}; // ambient always gold
+        d.col=isBurst?glitterColors[Math.floor(Math.random()*glitterColors.length)]:{r:255,g:180,b:40};
         const spd=isBurst?rnd(0.06,0.20):rnd(0.01,0.05);
         const theta=rnd(0,Math.PI*2),phi=Math.acos(rnd(-1,1));
         d.vx=spd*Math.sin(phi)*Math.cos(theta);
@@ -76,7 +79,7 @@ AFRAME.registerComponent('brain', {
       }
     }
 
-    // ── Shockwave ring ───────────────────────────────────────────────────────
+    // ── Ring ─────────────────────────────────────────────────────────────────
     const RING_N=32;
     for(let i=0;i<RING_N;i++){
       const el=document.createElement('a-sphere');
@@ -141,14 +144,14 @@ AFRAME.registerComponent('brain', {
       if(!n)return;
       n.fire=1.0;
       n.timer=isBurst?rnd(20,40):rnd(60,Math.max(70,220-intensity*160));
-      spawnDust(n.pos,isBurst?28:3,isBurst);
-      const maxAxons=isBurst?6:2;
+      spawnDust(n.pos,isBurst?20:3,isBurst);
+      const maxAxons=isBurst?4:2;
       let activated=0;
       const activeTotal=conns.filter(c=>c.active).length;
-      if(activeTotal>=(isBurst?60:25))return;
+      if(activeTotal>=(isBurst?50:25))return;
       conns.filter(c=>c.a===n||c.b===n).sort(()=>Math.random()-0.5).forEach(c=>{
         if(activated>=maxAxons)return;
-        if(Math.random()<(isBurst?0.9:0.2+intensity*0.35)){
+        if(Math.random()<(isBurst?0.85:0.2+intensity*0.35)){
           c.active=true;c.t=0;c.dir=c.a===n?1:-1;
           c.dot.setAttribute('visible','true');
           activated++;
@@ -156,79 +159,77 @@ AFRAME.registerComponent('brain', {
       });
     }
 
-    // ── Get best hand position — tries wrist joint first, falls back to object3D ──
+    // ── Get accurate hand world position from joints ──────────────────────────
     function getHandLocalPos(handEl){
-      // Try to get wrist joint world position — most accurate
-      const comp = handEl.components && handEl.components['hand-tracking-controls'];
-      if(comp && comp.joints){
-        const wrist = comp.joints['wrist']
+      const comp=handEl.components&&handEl.components['hand-tracking-controls'];
+      if(comp&&comp.joints){
+        // Try several joints in order of preference
+        const joint = comp.joints['wrist']
           || comp.joints['index-finger-metacarpal']
-          || comp.joints['middle-finger-metacarpal'];
-        if(wrist){
-          const wp = new THREE.Vector3();
-          wrist.getWorldPosition(wp);
-          const local = wp.clone();
+          || comp.joints['thumb-metacarpal'];
+        if(joint){
+          const wp=new THREE.Vector3();
+          joint.getWorldPosition(wp);
+          const local=wp.clone();
           document.getElementById('root').object3D.worldToLocal(local);
           return local;
         }
       }
-      // Fallback: use hand entity world position
-      const hp = new THREE.Vector3();
+      // Pure fallback
+      const hp=new THREE.Vector3();
       handEl.object3D.getWorldPosition(hp);
-      const local = hp.clone();
+      const local=hp.clone();
       document.getElementById('root').object3D.worldToLocal(local);
       return local;
     }
 
-    // ── Burst ────────────────────────────────────────────────────────────────
+    // ── Single burst function — only fires if not locked ─────────────────────
     function triggerBurst(handEl){
-      if(burstCD>0)return;
-      burstCD=90;
+      if(burstLocked)return;
+      lockBurst(); // immediately lock so no other method can fire
+
       intensity=Math.min(1,intensity+0.6);
 
-      const local = getHandLocalPos(handEl);
+      const local=getHandLocalPos(handEl);
 
-      spawnRing({x:local.x,y:local.y,z:local.z});
+      spawnRing(local);
+      spawnDust(local,45,true);
 
-      // Extra glitter burst right at hand
-      spawnDust({x:local.x,y:local.y,z:local.z},40,true);
+      // Only fire the single nearest neuron cluster — not a big radius
+      // Sort by distance, pick closest 1 neuron and its immediate neighbours only
+      const sorted=neurons.slice().sort((a,b)=>dist(a.pos,local)-dist(b.pos,local));
+      const closest=sorted[0];
+      const nearby=sorted.filter(n=>dist(n.pos,local)<1.8).slice(0,5);
 
-      // Fire nearest neurons to actual hand position
-      neurons.slice().sort((a,b)=>dist(a.pos,local)-dist(b.pos,local))
-        .slice(0,14).forEach((n,i)=>{
-          setTimeout(()=>fireNeuron(n,true),i*20+rnd(0,10));
-        });
+      // Fire closest first, then nearby with delay
+      fireNeuron(closest,true);
+      nearby.forEach((n,i)=>{
+        if(n===closest)return;
+        setTimeout(()=>fireNeuron(n,true),i*35+rnd(10,25));
+      });
     }
 
-    // ── Pinch detection — all three methods ──────────────────────────────────
+    // ── Pinch detection ───────────────────────────────────────────────────────
     const lh=document.getElementById('lh');
     const rh=document.getElementById('rh');
 
-    // Method 1: A-Frame pinchstarted event
+    // Method 1: A-Frame pinchstarted
     lh.addEventListener('pinchstarted',()=>triggerBurst(lh));
     rh.addEventListener('pinchstarted',()=>triggerBurst(rh));
 
-    // Method 2: WebXR selectstart — most reliable on Quest
-    const scene = document.getElementById('scene');
-    scene.addEventListener('enter-vr',()=>{
-      const xrSession = scene.xrSession;
+    // Method 2: WebXR selectstart on session
+    document.getElementById('scene').addEventListener('enter-vr',()=>{
+      const xrSession=document.getElementById('scene').xrSession;
       if(xrSession){
         xrSession.addEventListener('selectstart',(e)=>{
-          const h = e.inputSource && e.inputSource.handedness==='right' ? rh : lh;
+          const h=e.inputSource&&e.inputSource.handedness==='right'?rh:lh;
           triggerBurst(h);
         });
       }
     });
 
-    // Also catch it on the window for flat mode testing
-    window.addEventListener('selectstart',(e)=>{
-      try{
-        const h = e.inputSource && e.inputSource.handedness==='right' ? rh : lh;
-        triggerBurst(h);
-      }catch(err){triggerBurst(lh);}
-    });
-
-    // Method 3: Joint distance fallback in tick
+    // Method 3: joint distance — in tick below
+    let lWas=false,rWas=false;
     function checkPinchJoints(handEl){
       const c=handEl.components&&handEl.components['hand-tracking-controls'];
       if(!c||!c.joints)return false;
@@ -236,7 +237,7 @@ AFRAME.registerComponent('brain', {
       if(!T||!I)return false;
       const tp=new THREE.Vector3(),ip=new THREE.Vector3();
       T.getWorldPosition(tp);I.getWorldPosition(ip);
-      return tp.distanceTo(ip)<0.035;
+      return tp.distanceTo(ip)<0.032;
     }
 
     // Gentle startup
@@ -247,8 +248,8 @@ AFRAME.registerComponent('brain', {
 
     const cam=document.getElementById('cam');
 
-    // ── Tick ─────────────────────────────────────────────────────────────────
     this.tick=function(){
+      // Intensity from head rotation
       const rot=cam.object3D.rotation;
       let rv=0;
       if(prevRot){const dx=rot.x-prevRot.x,dy=rot.y-prevRot.y,dz=rot.z-prevRot.z;rv=Math.sqrt(dx*dx+dy*dy+dz*dz)*60;}
@@ -257,9 +258,8 @@ AFRAME.registerComponent('brain', {
       const avg=rotHist.reduce((s,v)=>s+v,0)/rotHist.length;
       intensity=lerp(intensity,clamp(avg*3.5,0,1),0.05);
       intensity=Math.max(0,intensity-0.0015);
-      if(burstCD>0)burstCD--;
 
-      // Method 3 pinch fallback
+      // Method 3 pinch — only if not already locked
       const lP=checkPinchJoints(lh),rP=checkPinchJoints(rh);
       if(lP&&!lWas)triggerBurst(lh);
       if(rP&&!rWas)triggerBurst(rh);
@@ -273,8 +273,7 @@ AFRAME.registerComponent('brain', {
         n.fire=Math.max(0,n.fire-0.05);
         const t=clamp(n.fire+intensity*0.2,0,1);
         const r=Math.floor(lerp(50,255,t)),g=Math.floor(lerp(25,200,t)),b=Math.floor(lerp(0,30,t));
-        const ei=(0.8+t*5).toFixed(2);
-        n.el.setAttribute('material',`color:rgb(${r},${g},${b});emissive:rgb(${r},${g},${b});emissiveIntensity:${ei};shader:standard`);
+        n.el.setAttribute('material',`color:rgb(${r},${g},${b});emissive:rgb(${r},${g},${b});emissiveIntensity:${(0.8+t*5).toFixed(2)};shader:standard`);
       });
 
       // Pulses
@@ -297,7 +296,7 @@ AFRAME.registerComponent('brain', {
         }
       });
 
-      // Glitter dust
+      // Dust
       dust.forEach(d=>{
         if(!d.active)return;
         d.life-=d.isBurst?0.025:0.05;
@@ -306,11 +305,9 @@ AFRAME.registerComponent('brain', {
         d.vx*=0.93;d.vy*=0.93;d.vz*=0.93;
         d.el.setAttribute('position',`${fmt(d.x)} ${fmt(d.y)} ${fmt(d.z)}`);
         if(d.col){
-          const ei=(d.life*(d.isBurst?9:5)).toFixed(2);
-          // Glitter flickers slightly
           const flicker=0.7+Math.random()*0.3;
           const r=Math.floor(d.col.r*flicker),g=Math.floor(d.col.g*flicker),b=Math.floor(d.col.b*flicker);
-          d.el.setAttribute('material',`color:rgb(${r},${g},${b});emissive:rgb(${r},${g},${b});emissiveIntensity:${ei};shader:standard`);
+          d.el.setAttribute('material',`color:rgb(${r},${g},${b});emissive:rgb(${r},${g},${b});emissiveIntensity:${(d.life*(d.isBurst?9:5)).toFixed(2)};shader:standard`);
         }
       });
 
