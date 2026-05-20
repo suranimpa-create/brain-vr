@@ -32,58 +32,56 @@
   background="color: #000005"
   renderer="antialias: true; logarithmicDepthBuffer: true"
   vr-mode-ui="enabled: true"
+  hand-tracking-controls-enabled
   id="scene">
 
-  <!-- Ambient + directional light -->
   <a-light type="ambient" color="#0a0a1a" intensity="2"></a-light>
   <a-light type="point" color="#4488ff" intensity="0.3" position="0 0 0"></a-light>
 
-  <!-- Camera rig — player stands at origin, inside the brain -->
   <a-entity id="rig" position="0 1.6 0">
-    <a-camera id="cam" look-controls wasd-controls="enabled: false">
-      <!-- Controller visualisers (hands) -->
-    </a-camera>
+    <a-camera id="cam" look-controls wasd-controls="enabled: false"></a-camera>
 
-    <!-- Left controller -->
+    <!-- Hand tracking -->
     <a-entity id="left-hand"
-      oculus-touch-controls="hand: left"
-      position="-0.3 -0.4 -0.5">
+      hand-tracking-controls="hand: left; modelStyle: dots"
+      position="0 0 0">
+    </a-entity>
+    <a-entity id="right-hand"
+      hand-tracking-controls="hand: right; modelStyle: dots"
+      position="0 0 0">
     </a-entity>
 
-    <!-- Right controller -->
-    <a-entity id="right-hand"
-      oculus-touch-controls="hand: right"
-      position="0.3 -0.4 -0.5">
-    </a-entity>
+    <!-- Controller fallback -->
+    <a-entity id="left-ctrl" oculus-touch-controls="hand: left"></a-entity>
+    <a-entity id="right-ctrl" oculus-touch-controls="hand: right"></a-entity>
   </a-entity>
 
-  <!-- Neuron container — all neurons live here -->
   <a-entity id="brain-root" position="0 1.6 0"></a-entity>
-
-  <!-- Fog-like depth sphere -->
   <a-sphere radius="18" material="color: #000010; side: back; opacity: 0.6; transparent: true"></a-sphere>
 
 </a-scene>
 
 <script>
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
 const NUM_NEURONS     = 120;
-const BRAIN_RADIUS    = 6;      // metres — you're inside this
-const MAX_CONN_DIST   = 2.8;    // max distance for a synaptic connection
-const BASE_FIRE_RATE  = 0.008;  // chance per frame at rest
-const MAX_FIRE_RATE   = 0.18;   // chance per frame at peak intensity
-const PULSE_SPEED     = 1.8;    // metres per second along axon
+const BRAIN_RADIUS    = 6;
+const MAX_CONN_DIST   = 2.8;
+const BASE_FIRE_RATE  = 0.008;
+const MAX_FIRE_RATE   = 0.18;
+const PULSE_SPEED     = 1.8;
 
-// ─── STATE ────────────────────────────────────────────────────────────────────
-let intensity   = 0;      // 0–1 overall excitation
+let intensity   = 0;
 let neurons     = [];
 let connections = [];
-let lastHeadQuat = null;
 let rotationVelHistory = [];
+let burstCooldown = 0;
 
-// ─── UTILS ────────────────────────────────────────────────────────────────────
+// Pinch tracking
+let leftPinching  = false;
+let rightPinching = false;
+let leftWasPinching  = false;
+let rightWasPinching = false;
+
 function randSpherePoint(r) {
-  // uniform distribution inside sphere
   const u = Math.random(), v = Math.random();
   const theta = 2 * Math.PI * u;
   const phi   = Math.acos(2 * v - 1);
@@ -102,22 +100,18 @@ function dist3(a, b) {
 function lerp(a, b, t) { return a + (b - a) * t; }
 
 function hexFromIntensity(fireAmt, baseIntensity) {
-  // Resting: deep blue. Firing: bright cyan-white
   const r = Math.floor(lerp(20,  255, fireAmt * 0.6 + baseIntensity * 0.1));
   const g = Math.floor(lerp(40,  240, fireAmt * 0.8 + baseIntensity * 0.15));
   const b = Math.floor(lerp(120, 255, fireAmt + baseIntensity * 0.2));
   return `rgb(${r},${g},${b})`;
 }
 
-// ─── NEURON CLASS ─────────────────────────────────────────────────────────────
 class Neuron {
   constructor(scene) {
     this.pos = randSpherePoint(BRAIN_RADIUS);
     this.fireAmt   = 0;
     this.firing    = false;
     this.timer     = Math.random() * 120;
-
-    // A-Frame sphere entity
     this.el = document.createElement('a-sphere');
     this.el.setAttribute('radius', 0.06 + Math.random() * 0.05);
     this.el.setAttribute('position', `${this.pos.x} ${this.pos.y} ${this.pos.z}`);
@@ -130,46 +124,37 @@ class Neuron {
   fire() {
     this.firing  = true;
     this.fireAmt = 1.0;
-    // Reset timer with intensity-modulated interval
     this.timer = 20 + Math.random() * (180 - intensity * 140);
   }
 
-  update(dt) {
+  update() {
     this.timer -= 1;
     const fireChance = lerp(BASE_FIRE_RATE, MAX_FIRE_RATE, intensity);
     if (this.timer <= 0 || Math.random() < fireChance * 0.05) {
       this.fire();
-      // Propagate to connected neurons
       connections
         .filter(c => c.a === this || c.b === this)
         .forEach(c => {
-          if (Math.random() < 0.35 + intensity * 0.55) {
-            c.addPulse(this);
-          }
+          if (Math.random() < 0.35 + intensity * 0.55) c.addPulse(this);
         });
     }
-
     if (this.firing) {
       this.fireAmt *= 0.88;
       if (this.fireAmt < 0.02) { this.firing = false; this.fireAmt = 0; }
     }
-
-    // Update visual
     const col = hexFromIntensity(this.fireAmt, intensity);
     const emissiveInt = 0.3 + this.fireAmt * 2.5 + intensity * 0.4;
     this.el.setAttribute('material', `color: ${col}; emissive: ${col}; emissiveIntensity: ${emissiveInt.toFixed(2)}; shader: standard`);
   }
 }
 
-// ─── PULSE CLASS ──────────────────────────────────────────────────────────────
 class Pulse {
   constructor(from, to, scene) {
     this.from  = from;
     this.to    = to;
-    this.t     = 0; // 0 → 1
+    this.t     = 0;
     const d    = dist3(from.pos, to.pos);
-    this.speed = PULSE_SPEED / (d * 60); // per frame at 60fps
-
+    this.speed = PULSE_SPEED / (d * 60);
     this.el = document.createElement('a-sphere');
     this.el.setAttribute('radius', 0.035);
     this.el.setAttribute('segments-height', 6);
@@ -196,40 +181,30 @@ class Pulse {
   }
 }
 
-// ─── CONNECTION CLASS ─────────────────────────────────────────────────────────
 class Connection {
   constructor(a, b, scene) {
     this.a = a;
     this.b = b;
     this.pulses = [];
     this.scene  = scene;
-
-    // Draw axon line as a thin cylinder
     const mid = {
       x: (a.pos.x + b.pos.x) / 2,
       y: (a.pos.y + b.pos.y) / 2,
       z: (a.pos.z + b.pos.z) / 2
     };
-    const d = dist3(a.pos, b.pos);
-
-    // Direction vector for rotation
+    const d  = dist3(a.pos, b.pos);
     const dx = b.pos.x - a.pos.x;
     const dy = b.pos.y - a.pos.y;
     const dz = b.pos.z - a.pos.z;
-
     this.el = document.createElement('a-cylinder');
     this.el.setAttribute('position', `${mid.x.toFixed(3)} ${mid.y.toFixed(3)} ${mid.z.toFixed(3)}`);
     this.el.setAttribute('radius', 0.006);
     this.el.setAttribute('height', d.toFixed(3));
     this.el.setAttribute('segments-radial', 4);
     this.el.setAttribute('material', `color: #1a3a6a; opacity: 0.25; transparent: true; shader: standard`);
-
-    // Rotate cylinder to point from a → b
-    // A-Frame cylinders default to Y-axis; we need to align to the direction vector
     const angle = Math.atan2(Math.sqrt(dx*dx + dz*dz), dy) * 180 / Math.PI;
     const rotY  = Math.atan2(dx, dz) * 180 / Math.PI;
     this.el.setAttribute('rotation', `${(angle - 90).toFixed(2)} ${rotY.toFixed(2)} 0`);
-
     scene.appendChild(this.el);
   }
 
@@ -240,11 +215,7 @@ class Connection {
   }
 
   update() {
-    this.pulses = this.pulses.filter(p => {
-      p.update();
-      return !p.done;
-    });
-    // Pulse axon colour when active
+    this.pulses = this.pulses.filter(p => { p.update(); return !p.done; });
     const active = this.pulses.length > 0;
     const op = active ? (0.4 + intensity * 0.3).toFixed(2) : (0.12 + intensity * 0.08).toFixed(2);
     const col = active ? '#3a7aee' : '#1a3a6a';
@@ -252,30 +223,22 @@ class Connection {
   }
 }
 
-// ─── CONTROLLER BURST ─────────────────────────────────────────────────────────
-let burstCooldown = 0;
-
 function triggerBurst(handEl) {
   if (burstCooldown > 0) return;
   burstCooldown = 60;
 
-  // Find nearest neurons to controller world position
   const handPos = new THREE.Vector3();
   handEl.object3D.getWorldPosition(handPos);
-
-  // Convert to brain-root local space
   const brainRoot = document.getElementById('brain-root');
   const localPos  = new THREE.Vector3();
   brainRoot.object3D.worldToLocal(handPos.clone(), localPos);
 
-  // Sort neurons by distance to hand
   const sorted = neurons.slice().sort((a, b) => {
     const da = Math.hypot(a.pos.x - localPos.x, a.pos.y - localPos.y, a.pos.z - localPos.z);
     const db = Math.hypot(b.pos.x - localPos.x, b.pos.y - localPos.y, b.pos.z - localPos.z);
     return da - db;
   });
 
-  // Fire nearest 12 neurons in a cascade
   sorted.slice(0, 12).forEach((n, i) => {
     setTimeout(() => {
       n.fire();
@@ -285,16 +248,30 @@ function triggerBurst(handEl) {
     }, i * 40 + Math.random() * 30);
   });
 
-  // Spike intensity
   intensity = Math.min(1, intensity + 0.4);
 }
 
-// ─── INIT ─────────────────────────────────────────────────────────────────────
+// Detect pinch from hand joint positions
+function checkPinch(handEl) {
+  if (!handEl || !handEl.components['hand-tracking-controls']) return false;
+  const comp = handEl.components['hand-tracking-controls'];
+  if (!comp.joints) return false;
+
+  const thumb = comp.joints['thumb-tip'];
+  const index = comp.joints['index-finger-tip'];
+  if (!thumb || !index) return false;
+
+  const tp = new THREE.Vector3();
+  const ip = new THREE.Vector3();
+  thumb.getWorldPosition(tp);
+  index.getWorldPosition(ip);
+
+  const d = tp.distanceTo(ip);
+  return d < 0.03; // 3cm threshold
+}
+
 window.addEventListener('load', () => {
-  // Loading animation
-  setTimeout(() => {
-    document.getElementById('loading-fill').style.width = '100%';
-  }, 100);
+  setTimeout(() => { document.getElementById('loading-fill').style.width = '100%'; }, 100);
   setTimeout(() => {
     const l = document.getElementById('loading');
     l.style.opacity = 0;
@@ -305,12 +282,8 @@ window.addEventListener('load', () => {
   const brainRoot = document.getElementById('brain-root');
 
   scene.addEventListener('loaded', () => {
-    // Build neurons
-    for (let i = 0; i < NUM_NEURONS; i++) {
-      neurons.push(new Neuron(brainRoot));
-    }
+    for (let i = 0; i < NUM_NEURONS; i++) neurons.push(new Neuron(brainRoot));
 
-    // Build connections — each neuron connects to nearest neighbours
     for (let i = 0; i < neurons.length; i++) {
       for (let j = i + 1; j < neurons.length; j++) {
         const d = dist3(neurons[i].pos, neurons[j].pos);
@@ -320,37 +293,33 @@ window.addEventListener('load', () => {
       }
     }
 
-    // Trigger a few neurons immediately so it's not dead on load
     for (let k = 0; k < 8; k++) {
       setTimeout(() => neurons[Math.floor(Math.random() * neurons.length)].fire(), k * 300);
     }
 
-    // Controller button listeners
+    // Controller fallback listeners
+    const leftCtrl  = document.getElementById('left-ctrl');
+    const rightCtrl = document.getElementById('right-ctrl');
+    leftCtrl.addEventListener('triggerdown',  () => triggerBurst(leftCtrl));
+    rightCtrl.addEventListener('triggerdown', () => triggerBurst(rightCtrl));
+    leftCtrl.addEventListener('gripdown',     () => triggerBurst(leftCtrl));
+    rightCtrl.addEventListener('gripdown',    () => triggerBurst(rightCtrl));
+
     const leftHand  = document.getElementById('left-hand');
     const rightHand = document.getElementById('right-hand');
 
-    leftHand.addEventListener('triggerdown',  () => triggerBurst(leftHand));
-    rightHand.addEventListener('triggerdown', () => triggerBurst(rightHand));
-    leftHand.addEventListener('gripdown',     () => triggerBurst(leftHand));
-    rightHand.addEventListener('gripdown',    () => triggerBurst(rightHand));
-
-    // ─── MAIN LOOP ───────────────────────────────────────────────────────────
     let prevEuler = null;
     const cam = document.getElementById('cam');
 
-    scene.addEventListener('tick', (e) => {
-      const dt = e.detail.delta;
-
-      // ── Head rotation velocity → intensity ──────────────────────────────
-      const camObj   = cam.object3D;
-      const euler    = camObj.rotation;
-      let rotVel     = 0;
-
+    scene.addEventListener('tick', () => {
+      // Head rotation → intensity
+      const euler = cam.object3D.rotation;
+      let rotVel = 0;
       if (prevEuler) {
         const dx = euler.x - prevEuler.x;
         const dy = euler.y - prevEuler.y;
         const dz = euler.z - prevEuler.z;
-        rotVel = Math.sqrt(dx*dx + dy*dy + dz*dz) * 60; // normalise to per-second
+        rotVel = Math.sqrt(dx*dx + dy*dy + dz*dz) * 60;
       }
       prevEuler = { x: euler.x, y: euler.y, z: euler.z };
 
@@ -360,28 +329,31 @@ window.addEventListener('load', () => {
 
       const targetIntensity = Math.min(1, avgVel * 3.5);
       intensity = lerp(intensity, targetIntensity, 0.05);
-      intensity = Math.max(0, intensity - 0.002); // slow decay
-
+      intensity = Math.max(0, intensity - 0.002);
       if (burstCooldown > 0) burstCooldown--;
 
-      // ── Update neurons & connections ─────────────────────────────────────
-      neurons.forEach(n => n.update(dt));
-      connections.forEach(c => c.update(dt));
+      // Pinch detection → burst
+      const lPinch = checkPinch(leftHand);
+      const rPinch = checkPinch(rightHand);
 
-      // ── Two-hand distance modulation ─────────────────────────────────────
-      // (holding hands far apart = more stimulation — fun spatial mechanic)
-      const lh = document.getElementById('left-hand');
-      const rh = document.getElementById('right-hand');
-      if (lh.object3D && rh.object3D) {
+      if (lPinch && !leftWasPinching)  triggerBurst(leftHand);
+      if (rPinch && !rightWasPinching) triggerBurst(rightHand);
+      leftWasPinching  = lPinch;
+      rightWasPinching = rPinch;
+
+      // Two-hand spread → intensity boost
+      if (leftHand.object3D && rightHand.object3D) {
         const lPos = new THREE.Vector3();
         const rPos = new THREE.Vector3();
-        lh.object3D.getWorldPosition(lPos);
-        rh.object3D.getWorldPosition(rPos);
-        const handDist = lPos.distanceTo(rPos);
-        // Normalize 0.3m (hands together) → 1.5m (arms spread) → 0–0.3 bonus
+        leftHand.object3D.getWorldPosition(lPos);
+        rightHand.object3D.getWorldPosition(rPos);
+        const handDist  = lPos.distanceTo(rPos);
         const handBonus = Math.max(0, Math.min(0.3, (handDist - 0.3) / 4));
         intensity = Math.min(1, intensity + handBonus * 0.02);
       }
+
+      neurons.forEach(n => n.update());
+      connections.forEach(c => c.update());
     });
   });
 });
