@@ -25,7 +25,7 @@ AFRAME.registerComponent('brain', {
     const neurons = [], conns = [], dust = [], ring = [];
     let intensity = 0, prevRot = null, rotHist = [];
     let burstLocked = false;
-    let fistMode = false; // lines lit up mode
+    let linesLit = false;
 
     const glitterColors = [
       {r:255,g:220,b:50},{r:255,g:100,b:220},{r:80,g:220,b:255},
@@ -37,6 +37,58 @@ AFRAME.registerComponent('brain', {
     function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
     function distL(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
     function fmt(v){return parseFloat(v.toFixed(3));}
+
+    // ── Open palm detection ───────────────────────────────────────────────
+    // Open palm = all 4 fingertips are far from the wrist
+    // Closed hand = fingertips close to wrist
+    // Much simpler and more reliable than fist detection
+    function isOpenPalm(handEl){
+      const c = handEl.components && handEl.components['hand-tracking-controls'];
+      if(!c || !c.joints) return false;
+      const wrist     = c.joints['wrist'];
+      const indexTip  = c.joints['index-finger-tip'];
+      const middleTip = c.joints['middle-finger-tip'];
+      const ringTip   = c.joints['ring-finger-tip'];
+      const pinkyTip  = c.joints['pinky-finger-tip'];
+      if(!wrist || !indexTip || !middleTip || !ringTip || !pinkyTip) return false;
+      const wp = new THREE.Vector3();
+      const ip = new THREE.Vector3();
+      const mp = new THREE.Vector3();
+      const rp = new THREE.Vector3();
+      const pp = new THREE.Vector3();
+      wrist.getWorldPosition(wp);
+      // Skip if wrist not tracked
+      if(wp.lengthSq() < 0.0001) return false;
+      indexTip.getWorldPosition(ip);
+      middleTip.getWorldPosition(mp);
+      ringTip.getWorldPosition(rp);
+      pinkyTip.getWorldPosition(pp);
+      // All fingertips must be more than 0.1m from wrist = open hand
+      return (
+        ip.distanceTo(wp) > 0.10 &&
+        mp.distanceTo(wp) > 0.10 &&
+        rp.distanceTo(wp) > 0.10 &&
+        pp.distanceTo(wp) > 0.09
+      );
+    }
+
+    // ── Light up / dim all lines ──────────────────────────────────────────
+    function setLinesLit(lit){
+      if(linesLit === lit) return;
+      linesLit = lit;
+      conns.forEach(c=>{
+        if(c.active) return;
+        if(lit){
+          c.line.setAttribute('material','color:#ffdd00;emissive:#ffaa00;emissiveIntensity:4;opacity:0.95;transparent:true;shader:standard');
+        } else {
+          c.line.setAttribute('material','color:#aa6600;emissive:#331800;emissiveIntensity:1;opacity:0.5;transparent:true;shader:standard');
+        }
+      });
+      if(lit){
+        // Cascade fire across all neurons when palm opens
+        neurons.forEach((n,i)=>setTimeout(()=>fireNeuron(n,false), i*10 + rnd(0,8)));
+      }
+    }
 
     // ── Dust ─────────────────────────────────────────────────────────────
     for(let i=0;i<300;i++){
@@ -106,8 +158,7 @@ AFRAME.registerComponent('brain', {
         line.setAttribute('position',`${mx} ${my} ${mz}`);
         line.setAttribute('radius',0.005);line.setAttribute('height',fmt(d));
         line.setAttribute('segments-radial',4);line.setAttribute('rotation',`${ang} ${ry} 0`);
-        // Lines start visible and glowing — not dark
-        line.setAttribute('material','color:#aa6600;opacity:0.5;transparent:true;shader:standard');
+        line.setAttribute('material','color:#aa6600;emissive:#331800;emissiveIntensity:1;opacity:0.5;transparent:true;shader:standard');
         root.appendChild(line);
         const dot=document.createElement('a-sphere');
         dot.setAttribute('radius',0.038);
@@ -116,7 +167,7 @@ AFRAME.registerComponent('brain', {
         dot.setAttribute('visible','false');
         dot.setAttribute('position',`${fmt(a.pos.x)} ${fmt(a.pos.y)} ${fmt(a.pos.z)}`);
         root.appendChild(dot);
-        conns.push({a,b,line,dot,active:false,t:0,speed:1.8/(d*60),dir:1,flashTimer:0,baseLit:false});
+        conns.push({a,b,line,dot,active:false,t:0,speed:1.8/(d*60),dir:1,flashTimer:0});
       }
     }
 
@@ -137,39 +188,15 @@ AFRAME.registerComponent('brain', {
       });
     }
 
-    // ── Burst a random neuron — simple, always works ──────────────────────
     function triggerBurst(){
       if(burstLocked)return;
       burstLocked=true;
       setTimeout(()=>{burstLocked=false;},1000);
       intensity=Math.min(1,intensity+0.5);
-      const n=neurons[Math.floor(Math.random()*neurons.length)];
-      fireNeuron(n,true);
+      fireNeuron(neurons[Math.floor(Math.random()*neurons.length)],true);
     }
 
-    // ── Fist detection — all fingers curled = fist ────────────────────────
-    function isFist(handEl){
-      const c=handEl.components&&handEl.components['hand-tracking-controls'];
-      if(!c||!c.joints)return false;
-      // Check index and middle finger tips vs their MCPs
-      // If tips are close to wrist, hand is closed
-      const wrist=c.joints['wrist'];
-      const index=c.joints['index-finger-tip'];
-      const middle=c.joints['middle-finger-tip'];
-      const ring=c.joints['ring-finger-tip'];
-      if(!wrist||!index||!middle)return false;
-      const wp=new THREE.Vector3(),ip=new THREE.Vector3(),mp=new THREE.Vector3();
-      wrist.getWorldPosition(wp);
-      index.getWorldPosition(ip);
-      middle.getWorldPosition(mp);
-      if(wp.lengthSq()<0.0001)return false;
-      // Fist = fingertips close to wrist (typically < 0.09m)
-      const indexDist=ip.distanceTo(wp);
-      const middleDist=mp.distanceTo(wp);
-      return indexDist<0.09&&middleDist<0.09;
-    }
-
-    // ── Pinch listeners — all methods ─────────────────────────────────────
+    // ── Pinch = burst ─────────────────────────────────────────────────────
     const lh=document.getElementById('lh');
     const rh=document.getElementById('rh');
     lh.addEventListener('pinchstarted',triggerBurst);
@@ -181,8 +208,8 @@ AFRAME.registerComponent('brain', {
       sess.addEventListener('selectstart',triggerBurst);
     });
 
-    let lWasPinch=false,rWasPinch=false;
-    let lWasFist=false,rWasFist=false;
+    let lWasPinch=false, rWasPinch=false;
+    let lWasPalm=false, rWasPalm=false;
 
     function isPinching(handEl){
       const c=handEl.components&&handEl.components['hand-tracking-controls'];
@@ -218,30 +245,11 @@ AFRAME.registerComponent('brain', {
       if(rP&&!rWasPinch)triggerBurst();
       lWasPinch=lP;rWasPinch=rP;
 
-      // Fist detection → light up all lines
-      const lF=isFist(lh),rF=isFist(rh);
-      fistMode=lF||rF;
-      if((lF&&!lWasFist)||(rF&&!rWasFist)){
-        // Fist just made — light all lines bright gold
-        conns.forEach(c=>{
-          c.line.setAttribute('material','color:#ffcc00;emissive:#ffaa00;emissiveIntensity:3;opacity:0.9;transparent:true;shader:standard');
-          c.baseLit=true;
-        });
-        // Also trigger a wave of neuron firing
-        neurons.forEach((n,i)=>{
-          setTimeout(()=>fireNeuron(n,false),i*15);
-        });
-      }
-      if((!lF&&lWasFist)||(!rF&&rWasFist)){
-        // Fist released — return lines to normal
-        conns.forEach(c=>{
-          if(!c.active){
-            c.line.setAttribute('material','color:#aa6600;opacity:0.5;transparent:true;shader:standard');
-            c.baseLit=false;
-          }
-        });
-      }
-      lWasFist=lF;rWasFist=rF;
+      // Open palm → light up lines
+      const lPalm=isOpenPalm(lh), rPalm=isOpenPalm(rh);
+      const anyPalm=lPalm||rPalm;
+      if(anyPalm!==linesLit) setLinesLit(anyPalm);
+      lWasPalm=lPalm;rWasPalm=rPalm;
 
       neurons.forEach(n=>{
         n.timer-=1;
@@ -257,11 +265,13 @@ AFRAME.registerComponent('brain', {
         if(c.flashTimer>0){
           c.flashTimer--;
           if(c.flashTimer===0){
-            // Return to fist-lit or dim depending on state
-            const col=fistMode?'#ffcc00':'#aa6600';
-            const op=fistMode?'0.9':'0.5';
-            const ei=fistMode?'emissive: #ffaa00; emissiveIntensity:3;':'';
-            c.line.setAttribute('material',`color:${col};opacity:${op};transparent:true;shader:standard`);
+            if(!c.active){
+              if(linesLit){
+                c.line.setAttribute('material','color:#ffdd00;emissive:#ffaa00;emissiveIntensity:4;opacity:0.95;transparent:true;shader:standard');
+              } else {
+                c.line.setAttribute('material','color:#aa6600;emissive:#331800;emissiveIntensity:1;opacity:0.5;transparent:true;shader:standard');
+              }
+            }
           }
         }
         if(!c.active)return;
