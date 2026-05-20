@@ -24,14 +24,15 @@ AFRAME.registerComponent('brain', {
     const root = document.getElementById('root');
     const N = 55, R = 5;
     const neurons = [], conns = [], dust = [], ring = [];
-    let intensity = 0, prevRot = null, rotHist = [], burstCD = 0;
-
-    // Single global burst lock — all three detection methods share this
+    let intensity = 0, prevRot = null, rotHist = [];
     let burstLocked = false;
-    function lockBurst() {
-      burstLocked = true;
-      setTimeout(() => { burstLocked = false; }, 1200); // 1.2s cooldown
-    }
+
+    // Live hand positions — updated every tick
+    const handPos = {
+      lh: new THREE.Vector3(),
+      rh: new THREE.Vector3()
+    };
+    let lWas = false, rWas = false;
 
     const glitterColors = [
       {r:255,g:220,b:50},
@@ -46,7 +47,7 @@ AFRAME.registerComponent('brain', {
     function rnd(a,b){return a+Math.random()*(b-a);}
     function lerp(a,b,t){return a+(b-a)*t;}
     function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
-    function dist(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
+    function dist3(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2+(a.z-b.z)**2);}
     function fmt(v){return parseFloat(v.toFixed(3));}
 
     // ── Dust pool ────────────────────────────────────────────────────────────
@@ -115,7 +116,7 @@ AFRAME.registerComponent('brain', {
 
     // ── Connections ──────────────────────────────────────────────────────────
     for(let i=0;i<N;i++) for(let j=i+1;j<N;j++){
-      const d=dist(neurons[i].pos,neurons[j].pos);
+      const d=dist3(neurons[i].pos,neurons[j].pos);
       if(d<3.2&&Math.random()<0.38){
         const a=neurons[i],b=neurons[j];
         const mx=fmt((a.pos.x+b.pos.x)/2),my=fmt((a.pos.y+b.pos.y)/2),mz=fmt((a.pos.z+b.pos.z)/2);
@@ -139,153 +140,164 @@ AFRAME.registerComponent('brain', {
       }
     }
 
-    // ── Fire neuron ──────────────────────────────────────────────────────────
-    function fireNeuron(n,isBurst){
-      if(!n)return;
-      n.fire=1.0;
-      n.timer=isBurst?rnd(20,40):rnd(60,Math.max(70,220-intensity*160));
-      spawnDust(n.pos,isBurst?20:3,isBurst);
-      const maxAxons=isBurst?4:2;
-      let activated=0;
-      const activeTotal=conns.filter(c=>c.active).length;
-      if(activeTotal>=(isBurst?50:25))return;
+    // ── Fire single neuron ────────────────────────────────────────────────────
+    function fireNeuron(n, isBurst){
+      if(!n) return;
+      n.fire = 1.0;
+      n.timer = isBurst ? rnd(20,40) : rnd(60, Math.max(70, 220-intensity*160));
+      spawnDust(n.pos, isBurst ? 30 : 3, isBurst);
+      if(isBurst) spawnRing(n.pos); // ring appears ON the neuron itself
+      let activated = 0;
+      const activeTotal = conns.filter(c=>c.active).length;
+      if(activeTotal >= 25) return;
       conns.filter(c=>c.a===n||c.b===n).sort(()=>Math.random()-0.5).forEach(c=>{
-        if(activated>=maxAxons)return;
-        if(Math.random()<(isBurst?0.85:0.2+intensity*0.35)){
-          c.active=true;c.t=0;c.dir=c.a===n?1:-1;
+        if(activated >= (isBurst?3:2)) return;
+        if(Math.random() < (isBurst ? 0.8 : 0.2+intensity*0.35)){
+          c.active=true; c.t=0; c.dir=c.a===n?1:-1;
           c.dot.setAttribute('visible','true');
           activated++;
         }
       });
     }
 
-    // ── Get accurate hand world position from joints ──────────────────────────
-    function getHandLocalPos(handEl){
-      const comp=handEl.components&&handEl.components['hand-tracking-controls'];
-      if(comp&&comp.joints){
-        // Try several joints in order of preference
+    // ── Update hand positions every tick from joints ──────────────────────────
+    const rootObj = document.getElementById('root').object3D;
+
+    function updateHandPos(id){
+      const el = document.getElementById(id);
+      if(!el) return;
+      const comp = el.components && el.components['hand-tracking-controls'];
+      // Try joints first
+      if(comp && comp.joints){
         const joint = comp.joints['wrist']
           || comp.joints['index-finger-metacarpal']
-          || comp.joints['thumb-metacarpal'];
+          || comp.joints['thumb-metacarpal']
+          || comp.joints['index-finger-tip'];
         if(joint){
-          const wp=new THREE.Vector3();
+          const wp = new THREE.Vector3();
           joint.getWorldPosition(wp);
-          const local=wp.clone();
-          document.getElementById('root').object3D.worldToLocal(local);
-          return local;
+          // Convert to root local space
+          rootObj.worldToLocal(wp);
+          handPos[id].copy(wp);
+          return;
         }
       }
-      // Pure fallback
-      const hp=new THREE.Vector3();
-      handEl.object3D.getWorldPosition(hp);
-      const local=hp.clone();
-      document.getElementById('root').object3D.worldToLocal(local);
-      return local;
+      // Fallback: entity world position
+      const wp = new THREE.Vector3();
+      el.object3D.getWorldPosition(wp);
+      rootObj.worldToLocal(wp);
+      handPos[id].copy(wp);
     }
 
-    // ── Single burst function — only fires if not locked ─────────────────────
-    function triggerBurst(handEl){
-      if(burstLocked)return;
-      lockBurst(); // immediately lock so no other method can fire
+    // ── Pinch check from joints ───────────────────────────────────────────────
+    function checkPinch(id){
+      const el = document.getElementById(id);
+      if(!el) return false;
+      const comp = el.components && el.components['hand-tracking-controls'];
+      if(!comp || !comp.joints) return false;
+      const T = comp.joints['thumb-tip'];
+      const I = comp.joints['index-finger-tip'];
+      if(!T || !I) return false;
+      const tp = new THREE.Vector3(), ip = new THREE.Vector3();
+      T.getWorldPosition(tp); I.getWorldPosition(ip);
+      return tp.distanceTo(ip) < 0.032;
+    }
 
-      intensity=Math.min(1,intensity+0.6);
+    // ── Burst — fires exactly ONE neuron: the closest to the live hand pos ────
+    function triggerBurst(id){
+      if(burstLocked) return;
+      burstLocked = true;
+      setTimeout(()=>{ burstLocked = false; }, 1000);
 
-      const local=getHandLocalPos(handEl);
+      intensity = Math.min(1, intensity + 0.4);
 
-      spawnRing(local);
-      spawnDust(local,45,true);
+      // Use the live hand position updated this frame
+      const pos = handPos[id];
 
-      // Only fire the single nearest neuron cluster — not a big radius
-      // Sort by distance, pick closest 1 neuron and its immediate neighbours only
-      const sorted=neurons.slice().sort((a,b)=>dist(a.pos,local)-dist(b.pos,local));
-      const closest=sorted[0];
-      const nearby=sorted.filter(n=>dist(n.pos,local)<1.8).slice(0,5);
-
-      // Fire closest first, then nearby with delay
-      fireNeuron(closest,true);
-      nearby.forEach((n,i)=>{
-        if(n===closest)return;
-        setTimeout(()=>fireNeuron(n,true),i*35+rnd(10,25));
+      // Find single closest neuron to hand
+      let closest = null, closestDist = Infinity;
+      neurons.forEach(n=>{
+        const d = dist3(n.pos, pos);
+        if(d < closestDist){ closestDist = d; closest = n; }
       });
+
+      if(closest) fireNeuron(closest, true);
     }
 
-    // ── Pinch detection ───────────────────────────────────────────────────────
-    const lh=document.getElementById('lh');
-    const rh=document.getElementById('rh');
+    // ── Pinch listeners ───────────────────────────────────────────────────────
+    const lh = document.getElementById('lh');
+    const rh = document.getElementById('rh');
 
-    // Method 1: A-Frame pinchstarted
-    lh.addEventListener('pinchstarted',()=>triggerBurst(lh));
-    rh.addEventListener('pinchstarted',()=>triggerBurst(rh));
+    lh.addEventListener('pinchstarted', ()=>triggerBurst('lh'));
+    rh.addEventListener('pinchstarted', ()=>triggerBurst('rh'));
 
-    // Method 2: WebXR selectstart on session
     document.getElementById('scene').addEventListener('enter-vr',()=>{
-      const xrSession=document.getElementById('scene').xrSession;
+      const xrSession = document.getElementById('scene').xrSession;
       if(xrSession){
         xrSession.addEventListener('selectstart',(e)=>{
-          const h=e.inputSource&&e.inputSource.handedness==='right'?rh:lh;
-          triggerBurst(h);
+          const id = e.inputSource&&e.inputSource.handedness==='right' ? 'rh' : 'lh';
+          triggerBurst(id);
         });
       }
     });
 
-    // Method 3: joint distance — in tick below
-    let lWas=false,rWas=false;
-    function checkPinchJoints(handEl){
-      const c=handEl.components&&handEl.components['hand-tracking-controls'];
-      if(!c||!c.joints)return false;
-      const T=c.joints['thumb-tip'],I=c.joints['index-finger-tip'];
-      if(!T||!I)return false;
-      const tp=new THREE.Vector3(),ip=new THREE.Vector3();
-      T.getWorldPosition(tp);I.getWorldPosition(ip);
-      return tp.distanceTo(ip)<0.032;
-    }
-
-    // Gentle startup
+    // Startup ambient fire
     setTimeout(()=>{
       for(let k=0;k<3;k++)
         setTimeout(()=>fireNeuron(neurons[Math.floor(Math.random()*N)],false),k*500);
     },800);
 
-    const cam=document.getElementById('cam');
+    const cam = document.getElementById('cam');
 
-    this.tick=function(){
-      // Intensity from head rotation
-      const rot=cam.object3D.rotation;
-      let rv=0;
-      if(prevRot){const dx=rot.x-prevRot.x,dy=rot.y-prevRot.y,dz=rot.z-prevRot.z;rv=Math.sqrt(dx*dx+dy*dy+dz*dz)*60;}
-      prevRot={x:rot.x,y:rot.y,z:rot.z};
-      rotHist.push(rv);if(rotHist.length>20)rotHist.shift();
-      const avg=rotHist.reduce((s,v)=>s+v,0)/rotHist.length;
-      intensity=lerp(intensity,clamp(avg*3.5,0,1),0.05);
-      intensity=Math.max(0,intensity-0.0015);
+    // ── Tick ──────────────────────────────────────────────────────────────────
+    this.tick = function(){
+      // Update both hand positions from joints every single frame
+      updateHandPos('lh');
+      updateHandPos('rh');
 
-      // Method 3 pinch — only if not already locked
-      const lP=checkPinchJoints(lh),rP=checkPinchJoints(rh);
-      if(lP&&!lWas)triggerBurst(lh);
-      if(rP&&!rWas)triggerBurst(rh);
-      lWas=lP;rWas=rP;
+      // Head rotation → intensity
+      const rot = cam.object3D.rotation;
+      let rv = 0;
+      if(prevRot){
+        const dx=rot.x-prevRot.x,dy=rot.y-prevRot.y,dz=rot.z-prevRot.z;
+        rv = Math.sqrt(dx*dx+dy*dy+dz*dz)*60;
+      }
+      prevRot = {x:rot.x,y:rot.y,z:rot.z};
+      rotHist.push(rv); if(rotHist.length>20) rotHist.shift();
+      const avg = rotHist.reduce((s,v)=>s+v,0)/rotHist.length;
+      intensity = lerp(intensity, clamp(avg*3.5,0,1), 0.05);
+      intensity = Math.max(0, intensity-0.0015);
+
+      // Joint distance pinch fallback
+      const lP = checkPinch('lh'), rP = checkPinch('rh');
+      if(lP && !lWas) triggerBurst('lh');
+      if(rP && !rWas) triggerBurst('rh');
+      lWas=lP; rWas=rP;
 
       // Neurons
       neurons.forEach(n=>{
-        n.timer-=1;
-        const chance=intensity>0.05?0.0004+intensity*0.005:0.00012;
-        if(n.timer<=0||Math.random()<chance)fireNeuron(n,false);
-        n.fire=Math.max(0,n.fire-0.05);
-        const t=clamp(n.fire+intensity*0.2,0,1);
+        n.timer -= 1;
+        const chance = intensity>0.05 ? 0.0004+intensity*0.005 : 0.00012;
+        if(n.timer<=0 || Math.random()<chance) fireNeuron(n,false);
+        n.fire = Math.max(0, n.fire-0.05);
+        const t = clamp(n.fire+intensity*0.2,0,1);
         const r=Math.floor(lerp(50,255,t)),g=Math.floor(lerp(25,200,t)),b=Math.floor(lerp(0,30,t));
         n.el.setAttribute('material',`color:rgb(${r},${g},${b});emissive:rgb(${r},${g},${b});emissiveIntensity:${(0.8+t*5).toFixed(2)};shader:standard`);
       });
 
       // Pulses
       conns.forEach(c=>{
-        if(c.flashTimer>0){c.flashTimer--;if(c.flashTimer===0)c.line.setAttribute('material','color:#3d1f00;opacity:0.2;transparent:true;shader:standard');}
-        if(!c.active)return;
-        c.t+=c.speed*(1+intensity*2);
+        if(c.flashTimer>0){
+          c.flashTimer--;
+          if(c.flashTimer===0) c.line.setAttribute('material','color:#3d1f00;opacity:0.2;transparent:true;shader:standard');
+        }
+        if(!c.active) return;
+        c.t += c.speed*(1+intensity*2);
         if(c.t>=1){
-          c.active=false;c.t=0;c.dot.setAttribute('visible','false');
+          c.active=false; c.t=0; c.dot.setAttribute('visible','false');
           c.line.setAttribute('material','color:#ffcc00;opacity:0.85;transparent:true;shader:standard');
           c.flashTimer=12;
-          if(Math.random()<0.5)fireNeuron(c.dir===1?c.b:c.a,false);
+          if(Math.random()<0.5) fireNeuron(c.dir===1?c.b:c.a,false);
         } else {
           const from=c.dir===1?c.a:c.b,to=c.dir===1?c.b:c.a;
           const x=lerp(from.pos.x,to.pos.x,c.t),y=lerp(from.pos.y,to.pos.y,c.t),z=lerp(from.pos.z,to.pos.z,c.t);
@@ -298,8 +310,8 @@ AFRAME.registerComponent('brain', {
 
       // Dust
       dust.forEach(d=>{
-        if(!d.active)return;
-        d.life-=d.isBurst?0.025:0.05;
+        if(!d.active) return;
+        d.life -= d.isBurst ? 0.025 : 0.05;
         if(d.life<=0){d.active=false;d.el.setAttribute('visible','false');return;}
         d.x+=d.vx;d.y+=d.vy;d.z+=d.vz;
         d.vx*=0.93;d.vy*=0.93;d.vz*=0.93;
@@ -313,8 +325,8 @@ AFRAME.registerComponent('brain', {
 
       // Ring
       ring.forEach(d=>{
-        if(!d.active)return;
-        d.r+=0.13;d.life-=0.025;
+        if(!d.active) return;
+        d.r+=0.13; d.life-=0.025;
         if(d.life<=0){d.active=false;d.el.setAttribute('visible','false');return;}
         const x=d.cx+d.r*Math.cos(d.angle),z=d.cz+d.r*Math.sin(d.angle);
         d.el.setAttribute('position',`${fmt(x)} ${fmt(d.cy)} ${fmt(z)}`);
